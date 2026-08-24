@@ -15,9 +15,9 @@ NaN-outside semantics during fitting.
 MATLAB alignment notes
 ----------------------
 - ``bwareaopen(BW, N)`` is implemented with
-  ``skimage.morphology.remove_small_objects(BW, min_size=N)``.
+  ``skimage.morphology.remove_small_objects(BW, max_size=N)``.
 - ``~bwareaopen(~BW, N)`` is implemented as
-  ``~remove_small_objects(~BW, min_size=N)``.
+  ``~remove_small_objects(~BW, max_size=N)``.
 - Morphological operators are close but not bitwise-identical to MATLAB's image
   processing toolbox.
 - ``line_step`` is a best-effort Python approximation because MATLAB
@@ -238,8 +238,8 @@ def auto_edges(
     thresh = float(np.min(grad) + (np.mean(grad) - np.min(grad)) * factor)
 
     bw = grad > thresh
-    bw = remove_small_objects(bw, min_size=100, connectivity=2)
-    bw = ~remove_small_objects(~bw, min_size=50, connectivity=2)
+    bw = remove_small_objects(bw, max_size=100, connectivity=2)
+    bw = ~remove_small_objects(~bw, max_size=50, connectivity=2)
 
     se = diamond(thickness)
     bw = closing(bw, footprint=se)
@@ -299,11 +299,11 @@ def otsu_edges(
     outside = ~(sm <= thresh)
 
     bw = _binary_remove(np.asarray(outside, dtype=np.bool_))
-    bw = remove_small_objects(bw, min_size=100, connectivity=2)
-    bw = ~remove_small_objects(~bw, min_size=50, connectivity=2)
+    bw = remove_small_objects(bw, max_size=100, connectivity=2)
+    bw = ~remove_small_objects(~bw, max_size=50, connectivity=2)
     bw = dilation(bw, footprint=disk(3))
-    bw = remove_small_objects(bw, min_size=100, connectivity=2)
-    bw = ~remove_small_objects(~bw, min_size=50, connectivity=2)
+    bw = remove_small_objects(bw, max_size=100, connectivity=2)
+    bw = ~remove_small_objects(~bw, max_size=50, connectivity=2)
 
     return np.asarray(bw, dtype=np.bool_)
 
@@ -484,7 +484,7 @@ def adaptive(
         edge_band = sob_mag > 0
 
     edge_band = closing(edge_band, footprint=disk(10))
-    edge_band = remove_small_objects(edge_band, min_size=10, connectivity=2)
+    edge_band = remove_small_objects(edge_band, max_size=10, connectivity=2)
 
     se_line_vert = np.ones((10, 1), dtype=np.bool_)
     se_line_horz = np.ones((1, 10), dtype=np.bool_)
@@ -536,7 +536,7 @@ def parachute(
     thresh2 = -5.0 * sigma
 
     bw = (h <= thresh) & (h >= thresh2)
-    bw = remove_small_objects(bw, min_size=10, connectivity=2)
+    bw = remove_small_objects(bw, max_size=10, connectivity=2)
 
     return np.asarray(bw, dtype=np.bool_)
 

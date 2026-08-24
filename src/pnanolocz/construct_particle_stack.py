@@ -223,7 +223,7 @@ def construct_particle_stack(
     *,
     frame_axis: int = 0,
     part_frame_axis: int = 0,
-    matlab_indexing: bool = False,
+    matlab_indexing: bool = True,
     xtra: int = 20,
 ) -> np.ndarray:
     """Construct particle-centered image crops from an AFM image/movie.
@@ -244,8 +244,9 @@ def construct_particle_stack(
     part_frame_axis:
         Particle/frame axis for ``Part.Image``.  Use ``-1`` for MATLAB layout.
     matlab_indexing:
-        If true, ``Part.Locs[:, 4]`` is interpreted as MATLAB 1-based frame
-        indices.  If false, Python 0-based frame indices are used.
+        If true (the default), ``Part.Locs[:, 4]`` is interpreted as the
+        1-based frame labels produced by :func:`pnanolocz.detector.detector`.
+        Pass false explicitly for Python 0-based frame indices.
     xtra:
         Extra border used by the MATLAB function.  Default is 20.
 

@@ -71,12 +71,16 @@ def _validity_mask(
 
     m_excl = np.asarray(mask_excl, dtype=np.bool_)
     if m_excl.shape != arr.shape:
-        raise ValueError(f"{name} shape {m_excl.shape} must match image shape {arr.shape}")
+        raise ValueError(
+            f"{name} shape {m_excl.shape} must match image shape {arr.shape}"
+        )
 
     return np.asarray((~m_excl) & finite, dtype=np.bool_)
 
 
-def _polyfit_centered(x: np.ndarray, y: np.ndarray, order: int) -> tuple[np.ndarray, tuple[float, float]]:
+def _polyfit_centered(
+    x: np.ndarray, y: np.ndarray, order: int
+) -> tuple[np.ndarray, tuple[float, float]]:
     """Fit a polynomial using MATLAB ``polyfit(..., mu)`` style scaling.
 
     MATLAB's third ``polyfit`` output ``mu`` is ``[mean(x), std(x)]`` where
@@ -448,7 +452,12 @@ def level_log_y(
         )
 
         trend = np.flip(_log_model(xi, *params))
-        return np.asarray(arr - trend[:, None], dtype=np.float64)
+        normal = arr - trend[:, None]
+        reverse = arr - trend[::-1, None]
+        normal_range = np.ptp(np.nanmean(normal, axis=1))
+        reverse_range = np.ptp(np.nanmean(reverse, axis=1))
+        selected = normal if normal_range <= reverse_range else reverse
+        return np.asarray(selected, dtype=np.float64)
 
     except Exception:
         return np.asarray(arr.copy(), dtype=np.float64)
@@ -554,6 +563,31 @@ def apply_level(
     return np.asarray(out[0] if was_2d else out, dtype=np.float64)
 
 
+def get_background(
+    img: np.ndarray,
+    polyx: float,
+    polyy: float,
+    method: str,
+    mask: np.ndarray | None = None,
+    *,
+    smoothing_window: int = SMOOTHING_WINDOW,
+) -> np.ndarray:
+    """Return the background removed by :func:`apply_level`."""
+    arr = np.asarray(img, dtype=np.float64)
+    leveled = apply_level(
+        arr,
+        polyx=polyx,
+        polyy=polyy,
+        method=method,
+        mask=mask,
+        smoothing_window=smoothing_window,
+    )
+    return np.asarray(arr - leveled, dtype=np.float64)
+
+
+get_background.__version__ = "0.1.0"  # type: ignore[attr-defined]
+
+
 def level(
     img: np.ndarray,
     polyx: float,
@@ -572,6 +606,7 @@ def level(
 
 __all__ = [
     "apply_level",
+    "get_background",
     "level",
     "level_plane",
     "level_line",

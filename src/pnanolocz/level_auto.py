@@ -39,7 +39,7 @@ Supported routines
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -63,7 +63,9 @@ def _step_weighted(polyx: float, polyy: float, method: str) -> dict[str, Any]:
     return {"kind": "weighted", "polyx": polyx, "polyy": polyy, "method": method}
 
 
-def _step_threshold(method: str, limits: Any = None, invert: bool = False) -> dict[str, Any]:
+def _step_threshold(
+    method: str, limits: Any = None, invert: bool = False
+) -> dict[str, Any]:
     """Build a thresholding step."""
     return {"kind": "threshold", "method": method, "limits": limits, "invert": invert}
 
@@ -327,7 +329,9 @@ def _gauss1_model(x: np.ndarray, a1: float, b1: float, c1: float) -> np.ndarray:
     return np.asarray(a1 * np.exp(-((x - b1) ** 2) / (c**2)), dtype=np.float64)
 
 
-def _compute_gauss_limits_from_stack(stack: FloatArray, kind: str) -> tuple[float, float]:
+def _compute_gauss_limits_from_stack(
+    stack: FloatArray, kind: str
+) -> tuple[float, float]:
     """Fit MATLAB-style ``gauss1`` limits from the whole current result stack.
 
     MATLAB uses:
@@ -381,6 +385,116 @@ def _compute_gauss_limits_from_stack(stack: FloatArray, kind: str) -> tuple[floa
     raise ValueError(f"Unknown Gaussian limit kind: {kind!r}")
 
 
+def _compute_gauss_limits(image: np.ndarray, kind: str) -> tuple[float, float]:
+    """Compatibility entry point for the original per-image Gaussian fit."""
+    return _compute_gauss_limits_from_stack(np.asarray(image, dtype=np.float64), kind)
+
+
+def _matches_trigger(
+    func_obj: Callable[..., Any],
+    params: Mapping[str, Any],
+    trigger_spec: Mapping[str, Any],
+) -> bool:
+    """Match an original callable-based step against a trigger specification."""
+    expected = trigger_spec.get("after_step", trigger_spec)
+    expected_func = expected.get("func")
+    if expected_func is None and expected.get("kind") == "level":
+        expected_func = "apply_level"
+    if expected_func is not None and func_obj.__name__ != expected_func:
+        return False
+    return all(
+        key in ("func", "kind") or params.get(key) == value
+        for key, value in expected.items()
+    )
+
+
+def _maybe_inject_precond(
+    img: FloatArray,
+    routine: str,
+    func_obj: Callable[..., Any],
+    params: Mapping[str, Any],
+    injected: bool,
+    *,
+    apply_level_fn: Callable[..., FloatArray] | None = None,
+    debug: bool = False,
+) -> tuple[FloatArray, bool]:
+    """Compatibility wrapper for the original callable-based preconditioner."""
+    if injected:
+        return np.asarray(img, dtype=np.float64), True
+
+    policy = PRECOND_POLICIES.get(routine)
+    if policy is None or not _matches_trigger(func_obj, params, policy["trigger"]):
+        return np.asarray(img, dtype=np.float64), False
+
+    _, _, ratio = _compute_anisotropy_ratio(img)
+    for factor, strength in policy["gates"]:
+        if ratio > factor:
+            fn = apply_level if apply_level_fn is None else apply_level_fn
+            out = fn(img, polyx=strength, polyy=0, method="med_line", mask=None)
+            if debug:
+                print(f"[auto] precondition applied for ratio>{factor}")
+            return np.asarray(out, dtype=np.float64), True
+
+    return np.asarray(img, dtype=np.float64), False
+
+
+def _apply_legacy_routine(
+    stack: FloatArray,
+    frames: Sequence[int],
+    routine: str,
+    steps: Sequence[dict[str, Any]],
+) -> FloatArray:
+    """Execute the original callable-based ROUTINES representation."""
+    result = np.asarray(stack.copy(), dtype=np.float64)
+    for frame_idx in frames:
+        img = result[frame_idx]
+        mask: BoolArray | None = None
+        injected = False
+        for step in steps:
+            func = step["func"]
+            params = {key: value for key, value in step.items() if key != "func"}
+            if func is apply_thresholder:
+                args = params.get("args")
+                if (
+                    isinstance(args, (list, tuple))
+                    and len(args) == 1
+                    and isinstance(args[0], str)
+                    and args[0].startswith("gauss_")
+                ):
+                    args = _compute_gauss_limits(img, args[0])
+                mask = np.asarray(
+                    apply_thresholder(
+                        img,
+                        params["method"],
+                        args,
+                        invert=bool(params.get("invert", False)),
+                    ),
+                    dtype=np.bool_,
+                )
+                if mask.ndim == 3 and mask.shape[0] == 1:
+                    mask = mask[0]
+                continue
+
+            img = func(
+                img,
+                mask=mask,
+                **{
+                    key: value
+                    for key, value in params.items()
+                    if key not in ("args", "invert")
+                },
+            )
+            img, injected = _maybe_inject_precond(
+                np.asarray(img, dtype=np.float64),
+                routine=routine,
+                func_obj=func,
+                params=params,
+                injected=injected,
+            )
+            result[frame_idx] = img
+    return result
+
+
 def _apply_threshold_step(img: FloatArray, step: dict[str, Any]) -> BoolArray:
     """Run a threshold step and normalize its output to a 2-D boolean mask."""
     mask = apply_thresholder(
@@ -391,7 +505,9 @@ def _apply_threshold_step(img: FloatArray, step: dict[str, Any]) -> BoolArray:
     )
 
     if mask.ndim != 2:
-        raise RuntimeError("Internal error: thresholding a single frame did not return a 2D mask")
+        raise RuntimeError(
+            "Internal error: thresholding a single frame did not return a 2D mask"
+        )
 
     return np.asarray(mask, dtype=np.bool_)
 
@@ -570,6 +686,15 @@ def apply_level_auto(
         matlab_indexing=matlab_indexing,
     )
 
+    routine_steps = ROUTINES[routine]
+    if (
+        isinstance(routine_steps, list)
+        and routine_steps
+        and "func" in routine_steps[0]
+    ):
+        result = _apply_legacy_routine(stack, frames, routine, routine_steps)
+        return _restore_frame_axis(result, was_2d, original_frame_axis)
+
     if routine == "high-low x2 (fit)":
         result = _routine_high_low_x2_fit(stack, frames)
     elif routine == "iterative fit holes":
@@ -611,4 +736,7 @@ __all__ = [
     "ROUTINES",
     "STEPWISE_ROUTINES",
     "PRECOND_POLICIES",
+    "_compute_gauss_limits",
+    "_matches_trigger",
+    "_maybe_inject_precond",
 ]

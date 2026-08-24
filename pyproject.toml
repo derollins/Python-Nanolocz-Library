@@ -215,6 +215,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 addopts = "--cov=pnanolocz --cov-report=term-missing --cov-append"
 testpaths = ["tests"]
+norecursedirs = ["test_output"]
 
 [tool.coverage.run]
 branch = true

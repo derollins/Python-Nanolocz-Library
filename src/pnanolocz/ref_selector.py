@@ -9,6 +9,11 @@ Rectangle convention
 --------------------
 ``rect = (x, y, width, height)`` in MATLAB-style 1-based coordinates by default.
 Set ``matlab_indexing=False`` for 0-based Python rectangles.
+
+Stack convention
+----------------
+Python stacks are frame-first ``(frames, rows, cols)`` by default.  Pass
+``frame_axis=-1`` for MATLAB-style ``(rows, cols, frames)`` input.
 """
 
 from __future__ import annotations
@@ -51,10 +56,13 @@ def ref_selector(
     fold: int | None = None,
     *,
     rect: tuple[float, float, float, float] | None = None,
-    frame_axis: int = -1,
+    frame_axis: int = 0,
     matlab_indexing: bool = True,
 ) -> np.ndarray:
-    """Crop and optionally center/symmetrize a reference image."""
+    """Crop and optionally center/symmetrize a reference image.
+
+    For a 3-D input, the first frame along ``frame_axis`` is used.
+    """
     stack = _as_frame_first(d, frame_axis=frame_axis)
     dg = gaussian_filter(stack, sigma=(0, 0.7, 0.7))
     d1 = dg[0]

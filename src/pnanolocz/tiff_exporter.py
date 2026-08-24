@@ -4,6 +4,10 @@ Floating-point TIFF exporter for NanoLocz.
 This module ports MATLAB ``tiff_exporter.m``.  It writes 2-D images or 3-D image
 stacks as 32-bit floating-point TIFF files, optionally setting X/Y resolution
 tags from pixels-per-nanometre.
+
+The default 3-D layout is frame-first ``(frames, rows, cols)``, matching the
+leveling APIs.  Pass ``frame_axis=-1`` for MATLAB-style ``(rows, cols, frames)``
+input.
 """
 
 from __future__ import annotations
@@ -33,9 +37,12 @@ def tiff_exporter(
     full_file_name: str | Path,
     pix_per_nm: float | None = None,
     *,
-    frame_axis: int = -1,
+    frame_axis: int = 0,
 ) -> Path:
-    """Write a 2-D image or 3-D stack as a 32-bit floating-point TIFF."""
+    """Write a 2-D image or 3-D stack as a 32-bit floating-point TIFF.
+
+    ``frame_axis`` identifies the frame dimension for a 3-D input.
+    """
     frames, _, _ = _as_frame_first(image_sequence, frame_axis=frame_axis)
     path = Path(full_file_name)
     path.parent.mkdir(parents=True, exist_ok=True)

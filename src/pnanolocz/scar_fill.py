@@ -46,7 +46,9 @@ def scar_fill(
     scar_mask = np.vstack([np.zeros((1, scar_mask.shape[1]), dtype=bool), scar_mask])
     scar_mask = scar_mask[:-1, :]
 
-    scar_mask = remove_small_objects(scar_mask.astype(bool), min_size=3, connectivity=2)
+    scar_mask = remove_small_objects(
+        scar_mask.astype(bool), max_size=3, connectivity=2
+    )
 
     # MATLAB: medfilt2(At, [1, min_length*2]) > 0
     width = max(1, int(min_length) * 2)
