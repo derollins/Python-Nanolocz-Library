@@ -1,43 +1,30 @@
 """
-Automated leveling of AFM image stacks using MATLAB-aligned multi-step routines.
+Automated NanoLocz AFM stack leveling routines.
 
-This module implements automated, data-driven background correction workflows
-for Atomic Force Microscopy (AFM) images and image stacks. Each routine applies
-an ordered sequence of leveling and masking operations—polynomial plane fits,
-line-based drift correction, region-weighted leveling, and iterative refinement—
-to improve background flattening across challenging frames.
+This module ports MATLAB ``level_auto.m`` to Python and coordinates the three
+lower-level modules:
 
-All routines operate frame-by-frame and reuse the public function contracts of
-``pnanolocz.level``, ``pnanolocz.level_weighted``, and
-``pnanolocz.thresholder``. Masks follow the *exclusion mask* convention:
-``True`` = excluded, ``False`` = valid. Excluded pixels are omitted from fitting
-using MATLAB-style NaN-outside semantics (i.e., excluded pixels behave like NaN
-during fitting) but are preserved in the output arrays.
+- ``pnanolocz.level``
+- ``pnanolocz.level_weighted``
+- ``pnanolocz.thresholder``
 
-The implementation is a Python port of the MATLAB NanoLocz Library:
-    https://github.com/George-R-Heath/NanoLocz-Matlab-Library
-Original MATLAB code by George Heath, University of Leeds.
+Public Python conventions
+-------------------------
+- Image stacks are frame-first by default: ``(frames, rows, cols)``.
+- MATLAB-style stacks ``(rows, cols, frames)`` are supported with
+  ``frame_axis=-1``.
+- Masks returned by ``thresholder`` use ``True = excluded`` and are passed
+  directly into the leveling functions.
 
-MATLAB alignment
-----------------
-This Python version aims for algorithmic and numerical alignment with the MATLAB
-reference implementation of ``level_auto.m``. Due to differences in underlying
-numerical libraries (NumPy/SciPy vs MATLAB), floating-point behaviour, and
-optimizer conditioning, results may not be bit-for-bit identical. Where
-relevant, this module documents intentional alignment decisions such as
-anisotropy-gated preconditioning and MATLAB-style Gaussian histogram fitting.
+Important MATLAB alignment details
+----------------------------------
+The Gaussian-fit routines are intentionally implemented as multi-pass routines
+rather than ordinary step lists.  MATLAB fits the histogram on the whole current
+``result`` stack, not independently per frame.  This file preserves that
+behavior.
 
-Where in the MATLAB version the Gaussian histograms are fitted using the whole
-3D stack, in this Python version each 2D frame is fitted individually because
-each frame is processed independently. This is a known deviation from MATLAB
-and may be addressed in future versions.
-
-Available routines
+Supported routines
 ------------------
-Routines are selected by name via :func:`apply_level_auto` and are defined in
-the :data:`ROUTINES` mapping as an ordered list of steps. The supported routines
-mirror the MATLAB NanoLocz presets:
-
 - ``plane-line``
 - ``iterative 1nm high``
 - ``iterative -1nm low``
@@ -48,598 +35,359 @@ mirror the MATLAB NanoLocz presets:
 - ``iterative fit peaks``
 - ``multi-plane-edges``
 - ``multi-plane-otsu``
-
-Routine mechanics
------------------
-Each step is one of the following:
-
-- A leveling step via :func:`pnanolocz.level.apply_level`
-  (e.g., ``plane``, ``line``, ``med_line``, ``mean_plane``).
-- A region-weighted leveling step via
-  :func:`pnanolocz.level_weighted.apply_level_weighted` (e.g., weighted
-  ``plane`` or weighted ``med_line``).
-- A masking step via :func:`pnanolocz.thresholder.apply_thresholder`
-  which updates the current exclusion mask carried forward to subsequent steps.
-
-Some routines compute histogram bounds from a Gaussian fit to the image value
-distribution. These bounds are produced by fitting a MATLAB-style ``gauss1``
-model to a 100-bin histogram using SciPy and then forming thresholds from the
-fitted center and width.
-
-Anisotropy preconditioning
---------------------------
-To match the MATLAB implementation, selected routines may inject a one-off
-``med_line`` preconditioning step after a specific trigger (typically
-``plane(polyx=1, polyy=1)``). The injection is gated by an anisotropy ratio
-computed from the standard deviation of row-mean and column-mean profiles.
-Policies are defined in :data:`PRECOND_POLICIES`.
-
-Stacks
-------
-Functions operate on single images with shape ``(H, W)`` and stacks with shape
-``(N, H, W)``. A 2D input is treated as a single-frame stack internally and is
-returned as 2D.
-
-Examples
---------
->>> from pnanolocz.level_auto import apply_level_auto
->>> leveled = apply_level_auto(stack, routine="multi-plane-otsu")
-
->>> img_leveled = apply_level_auto(img, routine="plane-line")
-
-Authors
--------
-George Heath, University of Leeds (2025)
-Daniel E. Rollins, University of Leeds (2025)
-
-This module is part of the ``pNanoLocz-Lib`` Python library for AFM analysis.
 """
 
-from collections.abc import Callable, Mapping
-from typing import Any, Dict, Sequence
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 from scipy.optimize import curve_fit
 
 from pnanolocz.level import apply_level
 from pnanolocz.level_weighted import apply_level_weighted
 from pnanolocz.thresholder import apply_thresholder
 
-FloatArray = NDArray[np.float64]
-BoolArray = NDArray[np.bool_]
+FloatArray = np.ndarray[Any, np.dtype[np.float64]]
+BoolArray = np.ndarray[Any, np.dtype[np.bool_]]
 
-# Data‑driven routine definitions
-ROUTINES: Dict[str, Sequence[Dict[str, Any]]] = {
-    # Plane fit routine
+
+def _step_level(polyx: float, polyy: float, method: str) -> dict[str, Any]:
+    """Build a regular leveling step."""
+    return {"kind": "level", "polyx": polyx, "polyy": polyy, "method": method}
+
+
+def _step_weighted(polyx: float, polyy: float, method: str) -> dict[str, Any]:
+    """Build a weighted-region leveling step."""
+    return {"kind": "weighted", "polyx": polyx, "polyy": polyy, "method": method}
+
+
+def _step_threshold(
+    method: str, limits: Any = None, invert: bool = False
+) -> dict[str, Any]:
+    """Build a thresholding step."""
+    return {"kind": "threshold", "method": method, "limits": limits, "invert": invert}
+
+
+# Stepwise routines are the routines that can be expressed as a simple ordered
+# sequence of thresholding/leveling calls.  Gaussian-fit routines are handled
+# separately below because MATLAB fits their histograms on the full current stack.
+STEPWISE_ROUTINES: dict[str, list[dict[str, Any]]] = {
     "plane-line": [
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "med_line",
-        },
+        _step_level(1, 1, "plane"),
+        _step_level(1, 0, "med_line"),
     ],
-    # Iterative 1 nm high threshold routine
     "iterative 1nm high": [
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-np.inf, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-np.inf, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-np.inf, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-np.inf, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 0,
-            "method": "plane",
-        },
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-np.inf, 1.0)),
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-np.inf, 1.0)),
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-np.inf, 1.0)),
+        _step_level(0, 0, "med_line"),
+        _step_level(1, 0, "plane"),
+        _step_threshold("histogram", (-np.inf, 1.0)),
+        _step_level(0, 0, "med_line"),
+        _step_level(2, 0, "plane"),
     ],
-    # Iterative 1 nm low threshold routine
     "iterative -1nm low": [
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, np.inf],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, np.inf],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, np.inf],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, np.inf],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 0,
-            "method": "plane",
-        },
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-1.0, np.inf)),
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-1.0, np.inf)),
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-1.0, np.inf)),
+        _step_level(0, 0, "med_line"),
+        _step_level(1, 0, "plane"),
+        _step_threshold("histogram", (-1.0, np.inf)),
+        _step_level(0, 0, "med_line"),
+        _step_level(2, 0, "plane"),
     ],
-    # Iterative 1 nm high and 1 nm low threshold routine
     "iterative high low": [
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "plane",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": [-1, 1],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 0,
-            "method": "plane",
-        },
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-1.0, 1.0)),
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-1.0, 1.0)),
+        _step_level(1, 1, "plane"),
+        _step_threshold("histogram", (-1.0, 1.0)),
+        _step_level(0, 0, "med_line"),
+        _step_level(1, 0, "plane"),
+        _step_threshold("histogram", (-1.0, 1.0)),
+        _step_level(0, 0, "med_line"),
+        _step_level(2, 0, "plane"),
     ],
-    # Line level followed by Otsu threshold and a second line level
     "Line1 + Otsu Line2": [
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "line",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "otsu",
-            "args": [],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 0,
-            "method": "line",
-        },
+        _step_level(1, 0, "line"),
+        _step_threshold("otsu", None),
+        _step_level(2, 0, "line"),
     ],
-    # High- low twice
-    "high-low x2 (fit)": [
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": ["gauss_fit"],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 1,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-    ],
-    # Iteratively fit holes
-    "iterative fit holes": [
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 2,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": ["gauss_holes"],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 2,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": ["gauss_holes"],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 2,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "line",
-        },
-    ],
-    # Iterativly fit peaks
-    "iterative fit peaks": [
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 2,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": ["gauss_peaks"],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 2,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 0,
-            "polyy": 0,
-            "method": "med_line",
-        },
-        {
-            "func": apply_thresholder,
-            "method": "histogram",
-            "args": ["gauss_peaks"],
-            "invert": False,
-        },
-        {
-            "func": apply_level,
-            "polyx": 2,
-            "polyy": 2,
-            "method": "plane",
-        },
-        {
-            "func": apply_level,
-            "polyx": 1,
-            "polyy": 0,
-            "method": "line",
-        },
-    ],
-    # Multi plane edges level uses level_weighted
     "multi-plane-edges": [
-        {"func": apply_level, "polyx": 1, "polyy": 1, "method": "plane"},
-        {
-            "func": apply_thresholder,
-            "method": "auto edges",
-            "args": [0, 0],
-            "invert": False,
-        },
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {
-            "func": apply_thresholder,
-            "method": "auto edges",
-            "args": [-np.inf, np.inf],
-            "invert": False,
-        },
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {"func": apply_level_weighted, "polyx": 0, "polyy": 0, "method": "med_line"},
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {"func": apply_level_weighted, "polyx": 0, "polyy": 0, "method": "med_line"},
-        {"func": apply_thresholder, "method": "otsu", "args": [0, 0], "invert": False},
-        {"func": apply_level, "polyx": 0, "polyy": 0, "method": "mean_plane"},
+        _step_level(1, 1, "plane"),
+        _step_threshold("auto edges", (0, 0)),
+        _step_weighted(2, 2, "plane"),
+        # MATLAB contains a char-array-looking ['-inf', 'inf'] call here.
+        # Passing infinities falls back to auto_edges defaults in thresholder.py.
+        _step_threshold("auto edges", (-np.inf, np.inf)),
+        _step_weighted(2, 2, "plane"),
+        _step_weighted(0, 0, "med_line"),
+        _step_weighted(2, 2, "plane"),
+        _step_weighted(0, 0, "med_line"),
+        _step_threshold("otsu", (0, 0)),
+        _step_level(0, 0, "mean_plane"),
     ],
-    # Multi plane otsu level- uses level weighted
     "multi-plane-otsu": [
-        {"func": apply_level, "polyx": 1, "polyy": 1, "method": "plane"},
-        {
-            "func": apply_thresholder,
-            "method": "otsu edges",
-            "args": [0, 0],
-            "invert": False,
-        },
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {
-            "func": apply_thresholder,
-            "method": "otsu edges",
-            "args": [0, 0],
-            "invert": False,
-        },
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {
-            "func": apply_thresholder,
-            "method": "otsu edges",
-            "args": [0, 0],
-            "invert": False,
-        },
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {"func": apply_level_weighted, "polyx": 0, "polyy": 0, "method": "med_line"},
-        {
-            "func": apply_thresholder,
-            "method": "otsu edges",
-            "args": [0, 0],
-            "invert": False,
-        },
-        {"func": apply_level_weighted, "polyx": 2, "polyy": 2, "method": "plane"},
-        {"func": apply_level_weighted, "polyx": 0, "polyy": 0, "method": "med_line"},
-        {"func": apply_thresholder, "method": "otsu", "args": [0, 0], "invert": False},
-        {"func": apply_level, "polyx": 0, "polyy": 0, "method": "mean_plane"},
+        _step_level(1, 1, "plane"),
+        _step_threshold("otsu edges", (0, 0)),
+        _step_weighted(2, 2, "plane"),
+        _step_threshold("otsu edges", (0, 0)),
+        _step_weighted(2, 2, "plane"),
+        _step_threshold("otsu edges", (0, 0)),
+        _step_weighted(2, 2, "plane"),
+        _step_weighted(0, 0, "med_line"),
+        _step_threshold("otsu edges", (0, 0)),
+        _step_weighted(2, 2, "plane"),
+        _step_weighted(0, 0, "med_line"),
+        _step_threshold("otsu", (0, 0)),
+        _step_level(0, 0, "mean_plane"),
     ],
 }
 
+SPECIAL_GAUSSIAN_ROUTINES = {
+    "high-low x2 (fit)",
+    "iterative fit holes",
+    "iterative fit peaks",
+}
 
-# --- Anisotropy preconditioning policies --------------------------------------
-# A routine may declare that, *after* a specific step (trigger), we compute
-# the Y/X anisotropy ratio from the current image and possibly inject a
-# med_line precondition with the given polyx (float allowed).
-#
-# 'gates' are checked in order; for the first gate whose `ratio > factor`,
-# we apply med_line(polyx=<value>, polyy=0). For routines with a single gate,
-# just provide one pair.
-#
-# Trigger schema (current use-case):
-#   'after_step': {'func': 'apply_level', 'method': 'plane', 'polyx': 1, 'polyy': 1}
-#
+# Public routine registry kept for backwards compatibility with tests or user code.
+ROUTINES: dict[str, Any] = {
+    **STEPWISE_ROUTINES,
+    "high-low x2 (fit)": "special-gaussian",
+    "iterative fit holes": "special-gaussian",
+    "iterative fit peaks": "special-gaussian",
+}
+
+
+# MATLAB anisotropy preconditioning:
+# std_x = std(mean(prev, 1)); std_y = std(mean(prev, 2));
+# if std_y > factor * std_x: apply med_line(polyx=<strength>)
 PRECOND_POLICIES: dict[str, dict[str, Any]] = {
-    "multi-plane-edges": {
-        "trigger": {
-            "after_step": {
-                "func": "apply_level",
-                "method": "plane",
-                "polyx": 1,
-                "polyy": 1,
-            }
-        },
-        "gates": [
-            (7.0, 1.0),  # strong preconditioning: med_line(1.0)
-            (5.0, 0.6),  # light preconditioning:  med_line(0.6)
-        ],
-        "method": "med_line",
-    },
     "iterative 1nm high": {
-        "trigger": {
-            "after_step": {
-                "func": "apply_level",
-                "method": "plane",
-                "polyx": 1,
-                "polyy": 1,
-            }
-        },
-        "gates": [
-            (7.0, 1.0),  # strong preconditioning: med_line(1.0)
-            (5.0, 0.6),  # light preconditioning:  med_line(0.6)
-        ],
-        "method": "med_line",
+        "trigger": {"kind": "level", "method": "plane", "polyx": 1, "polyy": 1},
+        "gates": [(7.0, 1.0), (5.0, 0.6)],
     },
     "iterative -1nm low": {
-        "trigger": {
-            "after_step": {
-                "func": "apply_level",
-                "method": "plane",
-                "polyx": 1,
-                "polyy": 1,
-            }
-        },
-        "gates": [
-            (7.0, 1.0),  # strong preconditioning: med_line(1.0)
-            (5.0, 0.6),  # light preconditioning:  med_line(0.6)
-        ],
-        "method": "med_line",
+        "trigger": {"kind": "level", "method": "plane", "polyx": 1, "polyy": 1},
+        "gates": [(7.0, 1.0), (5.0, 0.6)],
     },
     "iterative high low": {
-        "trigger": {
-            "after_step": {
-                "func": "apply_level",
-                "method": "plane",
-                "polyx": 1,
-                "polyy": 1,
-            }
-        },
-        "gates": [
-            (7.0, 1.0),  # strong preconditioning: med_line(1.0)
-            (5.0, 0.6),  # light preconditioning:  med_line(0.6)
-        ],
-        "method": "med_line",
+        "trigger": {"kind": "level", "method": "plane", "polyx": 1, "polyy": 1},
+        "gates": [(7.0, 1.0), (5.0, 0.6)],
+    },
+    "multi-plane-edges": {
+        "trigger": {"kind": "level", "method": "plane", "polyx": 1, "polyy": 1},
+        "gates": [(7.0, 1.0), (5.0, 0.6)],
     },
     "multi-plane-otsu": {
-        "trigger": {
-            "after_step": {
-                "func": "apply_level",
-                "method": "plane",
-                "polyx": 1,
-                "polyy": 1,
-            }
-        },
-        "gates": [
-            (5.7, 1.0),  # single gate in MATLAB
-        ],
-        "method": "med_line",
+        "trigger": {"kind": "level", "method": "plane", "polyx": 1, "polyy": 1},
+        "gates": [(5.7, 1.0)],
     },
-    # Add more routines here as    # Add more routines here as needed...
 }
+
+
+def _as_frame_first(img: np.ndarray, frame_axis: int) -> tuple[FloatArray, bool, int]:
+    """Convert an image or stack to frame-first order.
+
+    Returns
+    -------
+    stack:
+        Frame-first stack with shape ``(N, H, W)``.
+    was_2d:
+        Whether the input was a single 2-D image.
+    normalized_axis:
+        Normalized original frame axis, used for restoring output order.
+    """
+    arr = np.asarray(img, dtype=np.float64)
+
+    if arr.ndim == 2:
+        return arr[np.newaxis, :, :], True, 0
+
+    if arr.ndim != 3:
+        raise ValueError("img_stack must be 2D or 3D")
+
+    normalized_axis = int(frame_axis) % arr.ndim
+    stack = np.moveaxis(arr, normalized_axis, 0)
+    return np.asarray(stack, dtype=np.float64), False, normalized_axis
+
+
+def _restore_frame_axis(stack: FloatArray, was_2d: bool, frame_axis: int) -> np.ndarray:
+    """Restore output dimensionality and frame-axis order."""
+    if was_2d:
+        return np.asarray(stack[0], dtype=np.float64)
+
+    return np.asarray(np.moveaxis(stack, 0, frame_axis), dtype=np.float64)
+
+
+def _normalize_filter_frames(
+    filter_frames: Sequence[int] | None,
+    n_frames: int,
+    *,
+    matlab_indexing: bool,
+) -> list[int]:
+    """Normalize requested frame indices.
+
+    Python indexing is 0-based by default.  If ``matlab_indexing=True``, incoming
+    frame indices are interpreted as MATLAB 1-based indices and shifted by -1.
+    """
+    if filter_frames is None:
+        return list(range(n_frames))
+
+    frames = [int(i) - 1 if matlab_indexing else int(i) for i in filter_frames]
+
+    bad = [i for i in frames if i < 0 or i >= n_frames]
+    if bad:
+        raise IndexError(f"filter_frames contains out-of-range frame indices: {bad}")
+
+    return frames
+
+
+def _nanstd_1d(values: np.ndarray) -> float:
+    """MATLAB-like sample standard deviation with NaN omission."""
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size <= 1:
+        return 0.0
+    return float(np.std(values, ddof=1))
+
+
+def _compute_anisotropy_ratio(img: FloatArray) -> tuple[float, float, float]:
+    """Compute MATLAB ``std_y / std_x`` from row and column mean profiles."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        col_means = np.nanmean(img, axis=0)
+        row_means = np.nanmean(img, axis=1)
+
+    std_x = _nanstd_1d(col_means)
+    std_y = _nanstd_1d(row_means)
+
+    if std_x == 0.0:
+        ratio = float("inf") if std_y > 0.0 else 0.0
+    else:
+        ratio = std_y / std_x
+
+    return std_x, std_y, float(ratio)
+
+
+def _step_matches_trigger(step: dict[str, Any], trigger: dict[str, Any]) -> bool:
+    """Return True if a step matches a preconditioning trigger."""
+    for key, value in trigger.items():
+        if step.get(key) != value:
+            return False
+    return True
+
+
+def _maybe_apply_precondition(
+    img: FloatArray,
+    routine: str,
+    step: dict[str, Any],
+    already_applied: bool,
+) -> tuple[FloatArray, bool]:
+    """Apply MATLAB anisotropy-gated ``med_line`` preconditioning once.
+
+    A previous Python implementation returned after the first gate regardless of
+    whether the gate passed.  This corrected version checks all gates in order,
+    exactly like MATLAB's ``if`` / ``elseif`` chain.
+    """
+    if already_applied:
+        return np.asarray(img, dtype=np.float64), True
+
+    policy = PRECOND_POLICIES.get(routine)
+    if policy is None:
+        return np.asarray(img, dtype=np.float64), False
+
+    if not _step_matches_trigger(step, policy["trigger"]):
+        return np.asarray(img, dtype=np.float64), False
+
+    _, _, ratio = _compute_anisotropy_ratio(img)
+
+    for factor, med_line_strength in policy["gates"]:
+        if ratio > factor:
+            out = apply_level(
+                img,
+                polyx=float(med_line_strength),
+                polyy=0,
+                method="med_line",
+                mask=None,
+            )
+            return np.asarray(out, dtype=np.float64), True
+
+    return np.asarray(img, dtype=np.float64), False
+
+
+def _gauss1_model(x: np.ndarray, a1: float, b1: float, c1: float) -> np.ndarray:
+    """MATLAB ``gauss1`` model: ``a1 * exp(-((x-b1)^2) / c1^2)``."""
+    c = c1 if c1 != 0 else 1.0
+    return np.asarray(a1 * np.exp(-((x - b1) ** 2) / (c**2)), dtype=np.float64)
+
+
+def _compute_gauss_limits_from_stack(
+    stack: FloatArray, kind: str
+) -> tuple[float, float]:
+    """Fit MATLAB-style ``gauss1`` limits from the whole current result stack.
+
+    MATLAB uses:
+    ``[hy, x] = hist(double(t(:)), 100); gfit = fit(x', hy', 'gauss1')``.
+
+    This Python version uses ``np.histogram(..., bins=100)`` and ``curve_fit``.
+    The fitted width is used as ``abs(c1)`` because the model is symmetric in
+    the sign of ``c1`` but threshold limits must not be reversed.
+    """
+    data = np.asarray(stack, dtype=np.float64).ravel()
+    data = data[np.isfinite(data)]
+
+    if data.size == 0:
+        return -np.inf, np.inf
+
+    hy, edges = np.histogram(data, bins=100)
+    x = 0.5 * (edges[:-1] + edges[1:])
+
+    mean_data = float(np.mean(data))
+    std_data = float(np.std(data, ddof=1)) if data.size > 1 else 1.0
+    if not np.isfinite(std_data) or std_data == 0.0:
+        std_data = 1.0
+
+    try:
+        p0 = [float(np.max(hy)) if hy.size else 1.0, mean_data, std_data * np.sqrt(2.0)]
+        popt, _ = curve_fit(
+            _gauss1_model,
+            x,
+            hy.astype(np.float64),
+            p0=p0,
+            maxfev=10000,
+        )
+        _, b1, c1 = popt
+        center = float(b1)
+        width = abs(float(c1))
+        if not np.isfinite(width) or width == 0.0:
+            width = std_data * np.sqrt(2.0)
+    except Exception:
+        center = mean_data
+        width = std_data * np.sqrt(2.0)
+
+    delta = 1.5 * abs(float(width))
+
+    if kind == "gauss_fit":
+        return center - delta, center + delta
+    if kind == "gauss_holes":
+        return center - delta, np.inf
+    if kind == "gauss_peaks":
+        return -np.inf, center + delta
+
+    raise ValueError(f"Unknown Gaussian limit kind: {kind!r}")
+
+
+def _compute_gauss_limits(image: np.ndarray, kind: str) -> tuple[float, float]:
+    """Compatibility entry point for the original per-image Gaussian fit."""
+    return _compute_gauss_limits_from_stack(np.asarray(image, dtype=np.float64), kind)
 
 
 def _matches_trigger(
@@ -647,89 +395,17 @@ def _matches_trigger(
     params: Mapping[str, Any],
     trigger_spec: Mapping[str, Any],
 ) -> bool:
-    """
-    Match a just-executed step against a preconditioning trigger specification.
-
-    Parameters
-    ----------
-    func_obj : callable
-        Function used by the executed step (e.g., ``apply_level``).
-    params : dict
-        Step parameters excluding ``func`` (e.g., ``{"method": "plane", "polyx": 1}``).
-    trigger_spec : dict
-        Trigger specification of the form ``{"after_step": {...}}`` where the
-        inner mapping may include ``func`` and any subset of step parameters.
-
-    Returns
-    -------
-    match : bool
-        True if the executed step matches the trigger specification, else False.
-
-    Notes
-    -----
-    - The function compares the trigger's ``func`` against ``func_obj.__name__``
-      and compares any remaining key/value pairs against entries in ``params``.
-    """
-    aft = trigger_spec.get("after_step", {})
-    # func check
-    func_name = aft.get("func", None)
-    if func_name is not None:
-        # Identify func by symbol (fast) or by name fallback
-        if func_name == "apply_level" and func_obj.__name__ != "apply_level":
-            return False
-        if (
-            func_name == "apply_level_weighted"
-            and func_obj.__name__ != "apply_level_weighted"
-        ):
-            return False
-    # key-value checks inside params (e.g., method='plane', polyx=1, polyy=1)
-    for k, v in aft.items():
-        if k == "func":
-            continue
-        if params.get(k) != v:
-            return False
-    return True
-
-
-def _compute_anisotropy_ratio(img: FloatArray) -> tuple[float, float, float]:
-    """
-    Compute an anisotropy ratio from the standard deviation of row/column means.
-
-    The ratio is computed as ``std_y / std_x`` where:
-    ``std_x`` is the standard deviation of the column-mean profile and
-    ``std_y`` is the standard deviation of the row-mean profile.
-
-    Parameters
-    ----------
-    img : ndarray
-        2D image array. NaNs are ignored when computing means and standard
-        deviations.
-
-    Returns
-    -------
-    std_x : float
-        Standard deviation of the column means (X-direction profile).
-    std_y : float
-        Standard deviation of the row means (Y-direction profile).
-    ratio : float
-        ``std_y / std_x`` with guards for ``std_x == 0``. If ``std_x == 0`` and
-        ``std_y > 0``, ratio is ``inf``; if both are zero, ratio is ``0``.
-
-    Notes
-    -----
-    This mirrors the MATLAB logic used to decide whether to inject a
-    ``med_line`` preconditioning step.
-    """
-    col_means = np.nanmean(img, axis=0)
-    row_means = np.nanmean(img, axis=1)
-    std_x = float(np.nanstd(col_means))
-    std_y = float(np.nanstd(row_means))
-    if std_x == 0.0:
-        # Avoid inf; if both are zero, ratio==0; if only X=0 and Y>0, treat as inf.
-        ratio = 0.0 if std_y == 0.0 else float("inf")
-    else:
-        ratio = std_y / std_x
-    return std_x, std_y, ratio
+    """Match an original callable-based step against a trigger specification."""
+    expected = trigger_spec.get("after_step", trigger_spec)
+    expected_func = expected.get("func")
+    if expected_func is None and expected.get("kind") == "level":
+        expected_func = "apply_level"
+    if expected_func is not None and func_obj.__name__ != expected_func:
+        return False
+    return all(
+        key in ("func", "kind") or params.get(key) == value
+        for key, value in expected.items()
+    )
 
 
 def _maybe_inject_precond(
@@ -742,310 +418,325 @@ def _maybe_inject_precond(
     apply_level_fn: Callable[..., FloatArray] | None = None,
     debug: bool = False,
 ) -> tuple[FloatArray, bool]:
-    """
-    Inject a preconditioning leveling step when a routine-specific gate fires.
-
-    If the current routine declares a preconditioning policy and the just-run
-    step matches its trigger, this function computes the anisotropy ratio and
-    applies the first gate that passes by injecting a ``med_line`` step.
-
-    Parameters
-    ----------
-    img : ndarray
-        Current 2D image state after executing the step under consideration.
-    routine : str
-        Routine name used to look up a policy in ``PRECOND_POLICIES``.
-    func_obj : Any
-        Function object for the executed step (e.g., ``apply_level``).
-    params : dict
-        Parameters used for the executed step (excluding ``func``).
-    injected : bool
-        Whether a preconditioning step has already been injected for this frame.
-        If True, no further injections occur.
-    apply_level_fn : callable, optional
-        Dependency injection hook for testing. If not provided, ``apply_level``
-        is imported lazily.
-    debug : bool, default False
-        If True, print diagnostic messages about the decision and injection.
-
-    Returns
-    -------
-    img_out : ndarray
-        Image, possibly modified by an injected preconditioning step.
-    injected_out : bool
-        Updated injection flag.
-
-    Notes
-    -----
-    - At most one preconditioning injection is performed per frame.
-    - The injected call uses ``mask=None`` to mimic the MATLAB preconditioning
-      behavior (preconditioning is based on global structure, not masking).
-    """
+    """Compatibility wrapper for the original callable-based preconditioner."""
     if injected:
         return np.asarray(img, dtype=np.float64), True
 
     policy = PRECOND_POLICIES.get(routine)
-    if policy is None:
-        return img, False
+    if policy is None or not _matches_trigger(func_obj, params, policy["trigger"]):
+        return np.asarray(img, dtype=np.float64), False
 
-    trigger = policy.get("trigger", {})
-    if not _matches_trigger(func_obj, params, trigger):
-        return img, False
-
-    std_x, std_y, ratio = _compute_anisotropy_ratio(img)
-    if debug:
-        print(
-            f"[auto] routine={routine} post-plane(1,1) ratio={ratio:.3f} (std_y={std_y:.3g}, std_x={std_x:.3g})"  # noqa
-        )
-
-    gates = policy.get("gates", [])
-    method = policy.get("method", "med_line")
-    # iterate gates in order; first winner applies
-    for factor, polyx_value in gates:
+    _, _, ratio = _compute_anisotropy_ratio(img)
+    for factor, strength in policy["gates"]:
         if ratio > factor:
-            fn: Callable[..., FloatArray]
-            if apply_level_fn is None:
-                from pnanolocz.level import apply_level as _apply_level
+            fn = apply_level if apply_level_fn is None else apply_level_fn
+            out = fn(img, polyx=strength, polyy=0, method="med_line", mask=None)
+            if debug:
+                print(f"[auto] precondition applied for ratio>{factor}")
+            return np.asarray(out, dtype=np.float64), True
 
-                fn = _apply_level
-            else:
-                fn = apply_level_fn
-
-            img = fn(img, polyx=polyx_value, polyy=0, method=method, mask=None)
-
-        if debug:
-            print(
-                f"[auto]  precond applied: {method}(polyx={polyx_value}) for ratio>{factor}"  # noqa
-            )
-
-        return img, True
-
-    if debug:
-        print("[auto]  precond not applied (no gate passed)")
     return np.asarray(img, dtype=np.float64), False
 
 
-def _gauss1_model(
-    x: FloatArray,
-    a1: float,
-    b1: float,
-    c1: float,
-) -> FloatArray:
-    """
-    Evaluate a MATLAB-style single-Gaussian model used for histogram fitting.
-
-    Parameters
-    ----------
-    x : ndarray
-        Histogram bin centers.
-    a1, b1, c1 : float
-        MATLAB ``gauss1`` parameters: ``a1 * exp(-((x - b1)^2) / c1^2)``.
-
-    Returns
-    -------
-    y : ndarray
-        Model values at ``x``.
-    """
-    # MATLAB gauss1: a1 * exp(-((x - b1)^2) / c1^2)
-    return np.asarray(a1 * np.exp(-((x - b1) ** 2) / (c1**2)), dtype=np.float64)
-
-
-def _compute_gauss_limits(
-    image: np.ndarray[Any, np.dtype[np.float64]], kind: str
-) -> tuple[float, float]:
-    """
-    Compute threshold bounds by fitting a MATLAB-style Gaussian to a histogram.
-
-    This function replicates the MATLAB pattern:
-    ``[hy, x] = hist(double(t(:)), 100); gfit = fit(x', hy', 'gauss1')`` and then
-    forms bounds from the fitted center and width. NaNs in the image are ignored.
-
-    Parameters
-    ----------
-    image : ndarray
-        2D image used to derive histogram-based Gaussian limits. NaNs are ignored.
-    kind : str
-        Gaussian limit policy to apply. Must be one of:
-
-        - ``'gauss_fit'``   : symmetric limits ``(b1 - 1.5*c1, b1 + 1.5*c1)``
-        - ``'gauss_holes'`` : low limit for dark features ``(b1 - 1.5*c1, +inf)``
-        - ``'gauss_peaks'`` : high limit for bright features ``(-inf, b1 + 1.5*c1)``
-
-    Returns
-    -------
-    low, high : float
-        The computed intensity bounds.
-
-    Raises
-    ------
-    ValueError
-        If ``kind`` is not recognized.
-
-    Notes
-    -----
-    - The fit is performed using ``scipy.optimize.curve_fit`` on a 100-bin
-      histogram of the finite image values, using the model
-      ``a1 * exp(-((x - b1)^2) / c1^2)`` (MATLAB ``gauss1``).
-    - These limits are intended for use with the histogram thresholder step.
-    """
-    # flatten and drop NaNs
-    data = image.ravel()
-    data = data[~np.isnan(data)]
-    bins = 100
-    # 100-bin histogram like MATLAB's hist(double(t(:)),100)
-    hy, edges = np.histogram(data, bins=bins)
-    # Bin centers to match MATLAB's 'x' returned by hist
-    x = 0.5 * (edges[:-1] + edges[1:])
-
-    if not np.any(hy):
-        # fallback in pathological cases
-        mu = float(np.nanmean(data)) if data.size else 0.0
-        c1 = float(np.nanstd(data)) * np.sqrt(2) if data.size else 1.0
-        b1 = mu
-    else:
-        # Initial guesses matter for stable fits
-        a0 = float(hy.max())
-        b0 = float(np.mean(data))
-        # Note: choose c0 so that sigma ≈ c1/√2 initially (not critical, just stable)
-        c0 = float(np.std(data)) * np.sqrt(2) if data.size else 1.0
-
-        # Fit gauss1 to histogram centers vs counts
-        popt, _ = curve_fit(
-            _gauss1_model,
-            x,
-            hy.astype(float),
-            p0=[a0, b0, c0],
-            maxfev=10000,
-        )
-        a1, b1, c1 = popt
-
-    delta = 1.5 * c1
-    if kind == "gauss_fit":
-        low, high = b1 - delta, b1 + delta
-    elif kind == "gauss_holes":
-        low, high = b1 - delta, np.inf
-    elif kind == "gauss_peaks":
-        low, high = -np.inf, b1 + delta
-    else:
-        raise ValueError(f"Unknown fit kind {kind!r}")
-
-    return float(low), float(high)
-
-
-def apply_level_auto(
-    img_stack: np.ndarray[Any, np.dtype[np.float64]],
+def _apply_legacy_routine(
+    stack: FloatArray,
+    frames: Sequence[int],
     routine: str,
-) -> np.ndarray[Any, np.dtype[np.float64]]:
-    """
-    Apply an automated leveling routine to each frame of an AFM image stack.
-
-    Parameters
-    ----------
-    img_stack : ndarray
-        AFM image input with shape ``(H, W)`` (single image) or ``(N, H, W)``
-        (stack). The output has the same shape as the input.
-    routine : str
-        Name of a routine defined in ``ROUTINES`` (e.g., ``'multi-plane-otsu'``).
-
-    Returns
-    -------
-    result : ndarray
-        Leveled image or stack with the same shape as ``img_stack``.
-
-    Raises
-    ------
-    ValueError
-        If ``img_stack`` is not 2D/3D or if ``routine`` is not found in
-        ``ROUTINES``.
-
-    Notes
-    -----
-    - Each routine is an ordered list of steps. Steps may call ``apply_level``,
-      ``apply_level_weighted``, or ``apply_thresholder``.
-    - Thresholding steps compute an *exclusion mask* (``True = excluded``,
-      ``False = valid``) which is carried forward and passed to subsequent
-      leveling steps until replaced by a later thresholding step.
-    - Preconditioning (anisotropy-gated ``med_line``) is applied at most once
-      per frame according to ``PRECOND_POLICIES``.
-    - Gaussian-derived histogram bounds are computed by fitting a single
-      Gaussian to a 100-bin histogram (MATLAB ``gauss1``-style) via
-      ``_compute_gauss_limits`` when a thresholder step declares ``args=['gauss_*']``.
-    - The Gaussian-derived histogram bounds are calculated for each frame rather
-      than globally across the stack, diverging from MATLAB behavior.
-
-    Version
-    -------
-    0.1.0
-    """
-    img_stack = np.asarray(img_stack)
-    if img_stack.ndim == 2:
-        img_stack = img_stack[np.newaxis, :, :]
-        was_2d = True
-    elif img_stack.ndim == 3:
-        was_2d = False
-    else:
-        raise ValueError(
-            "img_stack must be either 2D or 3D with shape (H, W) or (N, H, W)"
-        )
-
-    if routine not in ROUTINES:
-        raise ValueError(f"Unknown routine '{routine}'")
-
-    result = img_stack.copy()
-    steps = ROUTINES[routine]
-    frames = range(img_stack.shape[0])
-
-    for i in frames:
-        img = result[i]
-        mask = None
-        injected_precond = False
-
-        for _idx, step in enumerate(steps):
+    steps: Sequence[dict[str, Any]],
+) -> FloatArray:
+    """Execute the original callable-based ROUTINES representation."""
+    result = np.asarray(stack.copy(), dtype=np.float64)
+    for frame_idx in frames:
+        img = result[frame_idx]
+        mask: BoolArray | None = None
+        injected = False
+        for step in steps:
             func = step["func"]
-            params = {k: v for k, v in step.items() if k != "func"}
-
+            params = {key: value for key, value in step.items() if key != "func"}
             if func is apply_thresholder:
-                method = params["method"]
-                args = params.get("args", None)
-                invert = params.get("invert", False)
-                # Intercept Gaussian-derived bounds
+                args = params.get("args")
                 if (
                     isinstance(args, (list, tuple))
                     and len(args) == 1
                     and isinstance(args[0], str)
                     and args[0].startswith("gauss_")
                 ):
-                    low, high = _compute_gauss_limits(img, args[0])
-                    mask = apply_thresholder(img, method, (low, high), invert=invert)
-                else:
-                    mask = apply_thresholder(img, method, args, invert=invert)
+                    args = _compute_gauss_limits(img, args[0])
+                mask = np.asarray(
+                    apply_thresholder(
+                        img,
+                        params["method"],
+                        args,
+                        invert=bool(params.get("invert", False)),
+                    ),
+                    dtype=np.bool_,
+                )
                 if mask.ndim == 3 and mask.shape[0] == 1:
                     mask = mask[0]
-                continue  # go to next step
+                continue
 
-            # Generic path for all other steps (unchanged)
             img = func(
                 img,
                 mask=mask,
-                **{k: v for k, v in params.items() if k not in ("args", "invert")},
+                **{
+                    key: value
+                    for key, value in params.items()
+                    if key not in ("args", "invert")
+                },
             )
-
-            # Preconditioning (your existing logic)
-            img, injected_precond = _maybe_inject_precond(
-                img,
-                routine,
+            img, injected = _maybe_inject_precond(
+                np.asarray(img, dtype=np.float64),
+                routine=routine,
                 func_obj=func,
                 params=params,
-                injected=injected_precond,
-                debug=False,
+                injected=injected,
+            )
+            result[frame_idx] = img
+    return result
+
+
+def _apply_threshold_step(img: FloatArray, step: dict[str, Any]) -> BoolArray:
+    """Run a threshold step and normalize its output to a 2-D boolean mask."""
+    mask = apply_thresholder(
+        img,
+        method=step["method"],
+        limits=step.get("limits", None),
+        invert=bool(step.get("invert", False)),
+    )
+
+    if mask.ndim != 2:
+        raise RuntimeError(
+            "Internal error: thresholding a single frame did not return a 2D mask"
+        )
+
+    return np.asarray(mask, dtype=np.bool_)
+
+
+def _apply_stepwise_routine(
+    stack: FloatArray,
+    frames: Sequence[int],
+    routine: str,
+) -> FloatArray:
+    """Apply a routine that is represented by a simple list of steps."""
+    if routine not in STEPWISE_ROUTINES:
+        raise ValueError(f"Unknown stepwise routine: {routine!r}")
+
+    result = np.asarray(stack.copy(), dtype=np.float64)
+    steps = STEPWISE_ROUTINES[routine]
+
+    for frame_idx in frames:
+        img = result[frame_idx]
+        mask: BoolArray | None = None
+        precondition_applied = False
+
+        for step in steps:
+            kind = step["kind"]
+
+            if kind == "threshold":
+                mask = _apply_threshold_step(img, step)
+                continue
+
+            if kind == "level":
+                img = apply_level(
+                    img,
+                    polyx=step["polyx"],
+                    polyy=step["polyy"],
+                    method=step["method"],
+                    mask=mask,
+                )
+            elif kind == "weighted":
+                img = apply_level_weighted(
+                    img,
+                    polyx=int(step["polyx"]),
+                    polyy=int(step["polyy"]),
+                    method=step["method"],
+                    mask=mask,
+                )
+            else:
+                raise RuntimeError(f"Unknown internal step kind: {kind!r}")
+
+            img, precondition_applied = _maybe_apply_precondition(
+                np.asarray(img, dtype=np.float64),
+                routine,
+                step,
+                precondition_applied,
             )
 
-            result[i] = img
+            result[frame_idx] = img
 
-    return np.asarray(result[0]) if was_2d else np.asarray(result)
-
-
-apply_level_auto.__version__ = "0.1.0"  # type: ignore[attr-defined]
+    return np.asarray(result, dtype=np.float64)
 
 
-__all__ = ["apply_level_auto", "ROUTINES"]
+def _routine_high_low_x2_fit(stack: FloatArray, frames: Sequence[int]) -> FloatArray:
+    """Implement MATLAB routine ``high-low x2 (fit)`` with stack-global fitting."""
+    result = np.asarray(stack.copy(), dtype=np.float64)
+
+    # First pass: flatten all requested frames before deriving the global histogram.
+    for frame_idx in frames:
+        prev = result[frame_idx]
+        prev = apply_level(prev, 1, 1, "plane")
+        prev = apply_level(prev, 0, 0, "med_line")
+        result[frame_idx] = prev
+
+    low, high = _compute_gauss_limits_from_stack(result, "gauss_fit")
+
+    # Second pass: mask using the stack-global Gaussian bounds, then level again.
+    for frame_idx in frames:
+        prev = result[frame_idx]
+        mask = apply_thresholder(prev, "histogram", (low, high), invert=False)
+        prev = apply_level(prev, 1, 1, "plane", mask=mask)
+        prev = apply_level(prev, 0, 0, "med_line", mask=mask)
+        result[frame_idx] = prev
+
+    return np.asarray(result, dtype=np.float64)
+
+
+def _routine_iterative_fit_holes_or_peaks(
+    stack: FloatArray,
+    frames: Sequence[int],
+    *,
+    mode: str,
+) -> FloatArray:
+    """Implement MATLAB ``iterative fit holes`` and ``iterative fit peaks``.
+
+    MATLAB performs two separate stack-global Gaussian fits:
+
+    1. Fit after the first plane/median-line pass.
+    2. Fit again after a masked plane/median-line refinement pass.
+    """
+    if mode == "holes":
+        kind = "gauss_holes"
+    elif mode == "peaks":
+        kind = "gauss_peaks"
+    else:
+        raise ValueError("mode must be 'holes' or 'peaks'")
+
+    result = np.asarray(stack.copy(), dtype=np.float64)
+
+    # First pass before Gaussian fit #1.
+    for frame_idx in frames:
+        prev = result[frame_idx]
+        prev = apply_level(prev, 2, 2, "plane")
+        prev = apply_level(prev, 0, 0, "med_line")
+        result[frame_idx] = prev
+
+    low, high = _compute_gauss_limits_from_stack(result, kind)
+
+    # Second pass before Gaussian fit #2.
+    for frame_idx in frames:
+        prev = result[frame_idx]
+        mask = apply_thresholder(prev, "histogram", (low, high), invert=False)
+        prev = apply_level(prev, 2, 2, "plane", mask=mask)
+        prev = apply_level(prev, 0, 0, "med_line", mask=mask)
+        result[frame_idx] = prev
+
+    low, high = _compute_gauss_limits_from_stack(result, kind)
+
+    # Third pass: final masked plane plus line correction.
+    for frame_idx in frames:
+        prev = result[frame_idx]
+        mask = apply_thresholder(prev, "histogram", (low, high), invert=False)
+        prev = apply_level(prev, 2, 2, "plane", mask=mask)
+        prev = apply_level(prev, 1, 0, "line", mask=mask)
+        result[frame_idx] = prev
+
+    return np.asarray(result, dtype=np.float64)
+
+
+def apply_level_auto(
+    img_stack: np.ndarray,
+    routine: str,
+    filter_frames: Sequence[int] | None = None,
+    *,
+    frame_axis: int = 0,
+    matlab_indexing: bool = False,
+) -> np.ndarray:
+    """Apply a NanoLocz automated leveling routine.
+
+    Parameters
+    ----------
+    img_stack:
+        2-D image or 3-D stack.  By default 3-D stacks are interpreted as
+        ``(frames, rows, cols)``.
+    routine:
+        Name of one of the supported NanoLocz routines.
+    filter_frames:
+        Optional sequence of frame indices to process.  If omitted, all frames
+        are processed.
+    frame_axis:
+        Axis containing frames.  Use ``frame_axis=-1`` for MATLAB-style
+        ``(rows, cols, frames)`` input.
+    matlab_indexing:
+        If ``True``, ``filter_frames`` are interpreted as MATLAB 1-based frame
+        indices.  If ``False``, Python 0-based indices are used.
+
+    Returns
+    -------
+    ndarray
+        Leveled image or stack with the same shape/order as the input.
+    """
+    if routine not in ROUTINES:
+        valid = ", ".join(sorted(ROUTINES))
+        raise ValueError(f"Unknown routine {routine!r}. Available routines: {valid}")
+
+    stack, was_2d, original_frame_axis = _as_frame_first(img_stack, frame_axis)
+    frames = _normalize_filter_frames(
+        filter_frames,
+        n_frames=stack.shape[0],
+        matlab_indexing=matlab_indexing,
+    )
+
+    routine_steps = ROUTINES[routine]
+    if (
+        isinstance(routine_steps, list)
+        and routine_steps
+        and "func" in routine_steps[0]
+    ):
+        result = _apply_legacy_routine(stack, frames, routine, routine_steps)
+        return _restore_frame_axis(result, was_2d, original_frame_axis)
+
+    if routine == "high-low x2 (fit)":
+        result = _routine_high_low_x2_fit(stack, frames)
+    elif routine == "iterative fit holes":
+        result = _routine_iterative_fit_holes_or_peaks(stack, frames, mode="holes")
+    elif routine == "iterative fit peaks":
+        result = _routine_iterative_fit_holes_or_peaks(stack, frames, mode="peaks")
+    else:
+        result = _apply_stepwise_routine(stack, frames, routine)
+
+    return _restore_frame_axis(result, was_2d, original_frame_axis)
+
+
+def level_auto(
+    img: np.ndarray,
+    filter_frames: Sequence[int] | None,
+    routine: str,
+) -> np.ndarray:
+    """MATLAB-style compatibility wrapper.
+
+    This wrapper assumes MATLAB input layout ``(rows, cols, frames)`` and
+    MATLAB 1-based frame indices.  New Python code should usually call
+    :func:`apply_level_auto` directly.
+    """
+    return apply_level_auto(
+        img,
+        routine=routine,
+        filter_frames=filter_frames,
+        frame_axis=-1,
+        matlab_indexing=True,
+    )
+
+
+apply_level_auto.__version__ = "0.2.0"  # type: ignore[attr-defined]
+
+
+__all__ = [
+    "apply_level_auto",
+    "level_auto",
+    "ROUTINES",
+    "STEPWISE_ROUTINES",
+    "PRECOND_POLICIES",
+    "_compute_gauss_limits",
+    "_matches_trigger",
+    "_maybe_inject_precond",
+]

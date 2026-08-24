@@ -51,3 +51,12 @@ coverage.xml
 .pytest_cache/
 .mypy_cache/
 .flake8
+
+# Local development and submission-excluded content
+/.idea/
+/.local/
+/Software_testing_images/
+/tests/
+/docs/
+/.test_artifacts/
+/.pytest_tmp*/

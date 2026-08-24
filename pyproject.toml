@@ -15,10 +15,10 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
+    "opencv-python-headless",
     "scipy",
-    "ruptures",
-    "sknw",
     "scikit-image>=0.26,<0.27",
+    "tifffile",
 ]
 keywords = [
   # Core domain
@@ -71,9 +71,42 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+notebook = [
+    "ipython",
+    "ipywidgets",
+    "matplotlib",
+    "nbformat",
+]
+io = [
+    "h5py",
+]
+analysis = [
+    "matplotlib",
+    "pandas",
+    "ruptures",
+    "sknw",
+]
+all = [
+    "h5py",
+    "ipython",
+    "ipywidgets",
+    "matplotlib",
+    "nbformat",
+    "pandas",
+    "ruptures",
+    "sknw",
+]
 dev = [
+    "h5py",
+    "ipython",
+    "ipywidgets",
+    "matplotlib",
+    "nbformat",
+    "pandas",
     "pytest>=7.0",
     "pytest-cov",
+    "ruptures",
+    "sknw",
     "pre-commit",
     "isort",
     "ruff",
@@ -182,6 +215,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 addopts = "--cov=pnanolocz --cov-report=term-missing --cov-append"
 testpaths = ["tests"]
+norecursedirs = ["test_output"]
 
 [tool.coverage.run]
 branch = true

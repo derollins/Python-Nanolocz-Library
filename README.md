@@ -43,7 +43,16 @@ Or clone & install locally:
 ```bash
 git clone https://github.com/derollins/Python-Nanolocz-Library.git
 cd Python-Nanolocz-Library
-pip install .
+pip install -e .
+```
+
+Install optional features only when needed:
+
+```bash
+pip install -e ".[notebook]"  # Jupyter widgets and plotting
+pip install -e ".[io]"        # HDF5 readers and writers
+pip install -e ".[analysis]"  # tables, plots, and advanced segmentation
+pip install -e ".[all,dev]"   # complete development environment
 ```
 
 ---
@@ -63,6 +72,30 @@ from the original NanoLocz platform:
 
 These libraries allow the Python implementation to match or exceed MATLAB’s capabilities while remaining open-source and
 easily extensible for AFM workflows.
+
+### Stable API
+
+The package root intentionally exposes a small, stable LAFM interface:
+
+```python
+from pnanolocz import (
+    LAFMWorkflow,
+    detector,
+    lafm_movie_renderer,
+    lafm_renderer,
+    localize,
+    localize_matlab,
+)
+```
+
+`LAFMWorkflow.find_all_peaks()` uses OpenCV cubic localization (`cvcubic`) by
+default. The previous SciPy `bicubic` method remains available explicitly.
+Specialized functionality is imported from its defining submodule, for example
+`from pnanolocz.align_trans import align_trans`.
+
+Large validation images in `Software_testing_images` are maintained locally and
+are not part of the repository. Tests requiring those files skip clearly when
+the directory is unavailable.
 
 ---
 
