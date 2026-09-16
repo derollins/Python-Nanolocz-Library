@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - 'CONTRIBUTING.md' file with contributor guidelines and development workflow.
+- MATLAB-aligned particle detection (`detector`, port of `Detector.m`) returning
+  a `pandas.DataFrame`, with `fast_peaks2d` (port of `Fast_peaks2D.m`) and
+  `normxcorr2` (MATLAB-compatible normalized cross-correlation).
+- `pandas` added to the core dependencies for detection-table outputs.
 
 ---
 
