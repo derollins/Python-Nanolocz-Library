@@ -327,6 +327,47 @@ def test_normxcorr2_self_correlation_peak():
     assert peak == (63, 63)  # (H-1, W-1)
 
 
+def _triangle_subpixel_pair(
+    size: int = 128, shift: tuple[float, float] = (2.3, -1.7)
+) -> tuple[np.ndarray, np.ndarray]:
+    """Frame pair replicating the synthetic sub-pixel alignment data.
+
+    Binary triangle + Gaussian edge smoothing + cubic-spline sub-pixel shift;
+    this combination makes the integral-image window variance cancel to
+    floating-point noise, which used to produce spurious correlation peaks
+    far above 1.
+    """
+    from scipy.ndimage import shift as spline_shift
+
+    w = max(5, int(size * 0.20))
+    h = int(np.ceil(w * np.sqrt(3) / 2))
+    mask = np.zeros((h, w), dtype=bool)
+    for row in range(h):
+        half = int((1.0 - (row + 0.5) / h) * w / 2)
+        if half > 0:
+            mask[row, half : w - half] = True
+        elif w % 2 == 1:
+            mask[row, w // 2] = True
+
+    img = np.zeros((size, size))
+    y0 = int(round(size / 2 - h / 2))
+    x0 = int(round(size / 2 - w / 2))
+    img[y0 : y0 + h, x0 : x0 + w] = mask.astype(np.float64)
+    img = gaussian_filter(img, sigma=1.5, mode="constant", cval=0.0)
+    img = img / img.max()
+
+    ref = spline_shift(img, (0.0, 0.0), order=3, prefilter=True)
+    mov = spline_shift(img, shift, order=3, prefilter=True)
+    return ref, mov
+
+
+def test_normxcorr2_flat_window_no_spurious_peak():
+    """Flat windows with tiny ringing must not give spurious peaks above 1."""
+    ref, mov = _triangle_subpixel_pair()
+    ccr = normxcorr2(ref, mov)  # full-frame template, large near-flat regions
+    assert float(np.nanmax(ccr)) <= 1.0 + 1e-9
+
+
 def test_normxcorr2_constant_template_returns_zeros():
     """A constant (zero-energy) template gives an all-zero map."""
     img = np.ones((16, 16))

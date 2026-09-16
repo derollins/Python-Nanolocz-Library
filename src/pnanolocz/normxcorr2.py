@@ -123,7 +123,14 @@ def normxcorr2(template: np.ndarray, image: np.ndarray) -> np.ndarray:
         - integral_sq[yy1, xx0]
         + integral_sq[yy0, xx0]
     )
-    local_energy = np.maximum(local_sum_sq - (local_sum**2 / area), 0.0)
+    local_energy = local_sum_sq - (local_sum**2 / area)
+    # Floating-point cancellation makes the window variance unreliable for
+    # near-flat windows (large zero-padded regions with tiny interpolation
+    # ringing).  Treat those as zero-energy so the denominator is zero and
+    # the output stays zero instead of amplifying noise into spurious
+    # correlation peaks far above 1.
+    noise_floor = np.maximum(local_sum_sq, 1.0) * 1e-12
+    local_energy = np.where(local_energy < noise_floor, 0.0, local_energy)
 
     denom = np.sqrt(local_energy * template_energy)
     out = np.zeros_like(numerator, dtype=np.float64)
