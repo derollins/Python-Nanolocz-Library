@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `pandas.DataFrame`, with `fast_peaks2d` (port of `Fast_peaks2D.m`) and
   `normxcorr2` (MATLAB-compatible normalized cross-correlation).
 - `pandas` added to the core dependencies for detection-table outputs.
+- MATLAB-aligned alignment tools (`align_trans`, `align_rot`, `align_movie`,
+  `align_iterate`, `align_ptcloud`, `construct_particle_stack`, `find_center`)
+  with sub-pixel parabolic peak refinement (documented deviation from the
+  MATLAB imresize convention; ~0.003 px on synthetic ground truth).
 
 ---
 

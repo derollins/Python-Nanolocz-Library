@@ -180,6 +180,10 @@ module = [
 ]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["tifffile.*"]
+follow_imports = "skip"
+
 [tool.pytest.ini_options]
 addopts = "--cov=pnanolocz --cov-report=term-missing --cov-append"
 testpaths = ["tests"]
