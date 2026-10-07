@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - 'CONTRIBUTING.md' file with contributor guidelines and development workflow.
+- Python-native particle detection (`detector`, port of `Detector.m`) returning a
+  0-based `pandas.DataFrame` in the NanoLocz `Part Locs` column layout
+  (`x, y, z, correlation, frame, id, track_id, angle`) with a boolean `kept`
+  column for interactive curation, and an opt-in `max_particles_per_frame` limit
+  for CCR detection that flags all but the N best-correlation detections of each
+  frame as `kept=False` without dropping rows (off by default; `True` uses the
+  default count of 1); with `peaks.fast_peaks2d` (port of `Fast_peaks2D.m`) and
+  `correlation.normxcorr2` (unit-independent, MATLAB-compatible normalized
+  cross-correlation).
+- `pandas` added to the core dependencies for detection-table outputs.
 
 ---
 
