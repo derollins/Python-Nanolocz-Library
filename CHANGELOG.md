@@ -12,7 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- 'CONTRIBUTING.md' file with contributor guidelines and development workflow.
+- `CONTRIBUTING.md` file with contributor guidelines and development workflow.
+- `detector` module, a port of NanoLocz `Detector.m`:
+  - `detector()` detects particles in a 2D frame or a frame-first `(N, H, W)` stack, using
+    either `'Peak picker'` (local maxima of the image) or `'ccr'` (normalized
+    cross-correlation against a reference image), with optional template rotation
+    (`angles`), edge exclusion (`ex_edge`), half-resolution fast detection (`fastdetect`) and
+    Gaussian filtering of the frames and correlation maps.
+  - Returns a `pandas.DataFrame` with columns `x, y, z, correlation, frame, angle`
+    (`DETECTOR_COLUMNS`). Coordinates and frame numbers are 0-based; an empty (0-row) table
+    is returned when nothing is detected.
+  - `limit_per_frame()` keeps the `n` highest-scoring detections in each frame (ranked by
+    `correlation`, or by `z` for Peak picker results) and leaves the input table unchanged.
+- `peaks` module: `fast_peaks2d()`, a port of `Fast_peaks2D.m`, returning a `Peaks` record
+  of 0-based integer `x`/`y` indices, `height` and optional `prominence`.
+- `correlation` module: `normxcorr2()`, an independent implementation of MATLAB-compatible
+  normalized 2D cross-correlation (`'full'` output). The result does not depend on the
+  units of the input data.
+
+### Changed
+
+- `pandas` added to the core dependencies, for tabular (detection) outputs.
 
 ---
 
