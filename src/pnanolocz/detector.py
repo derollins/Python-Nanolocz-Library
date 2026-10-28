@@ -34,15 +34,23 @@ the best ``n`` detections in each frame (one by default).
 Curation
 --------
 The table index is the stable 0-based detection id.  ``detector`` returns the
-default 0-based index in row order, and filtering or dropping rows keeps the
-surviving labels, so ``detections.index`` still identifies the same detections
-(``index + 1`` gives the corresponding MATLAB row).  Use
-``detections.drop(index=[...])`` to remove a detection without renumbering the
-rest, and ``detections.assign(id=detections.index)`` to add an explicit ``id``
-column for export.  A GUI that needs the non-destructive "include" mask can keep
-it outside the table as a boolean Series aligned with the index, for example
-``kept = pd.Series(True, index=detections.index)`` followed by
-``detections[kept]``; ``kept`` is not a detector column.
+default 0-based index in row order, and because pandas keeps each row's index
+label when the table is filtered, sorted or edited, filtering or dropping rows
+keeps the surviving labels, so ``detections.index`` still identifies the same
+detections (this includes :func:`limit_per_frame`).  The plain arrays in the
+internal :class:`Detections` record (and its ``as_dict()``) carry no such
+labels: filtering them renumbers the detections by position, so curate the
+DataFrame, not the arrays.
+
+Use ``detections.drop(index=[...])`` to remove a detection without renumbering
+the rest, and ``detections.assign(id=detections.index)`` to add an explicit
+``id`` column for export.  A caller that needs a non-destructive "include" mask
+can keep it outside the table as a boolean Series aligned with the index, for
+example ``kept = pd.Series(True, index=detections.index)`` followed by
+``detections[kept]``.  Operations that build a new table can renumber it, e.g.
+``reset_index(drop=True)``, ``merge`` on a column or
+``pd.concat(..., ignore_index=True)``; use ``join`` or
+``pd.concat(..., keys=...)`` to keep the ids.
 
 Notes
 -----
@@ -206,7 +214,9 @@ def limit_per_frame(
     detections : pandas.DataFrame
         Detection table with a ``frame`` column, e.g. from :func:`detector`.
     n : int, default 1
-        Maximum number of detections to keep per frame.
+        Maximum number of detections to keep per frame.  The default suits
+        single-particle movies; pass ``n`` explicitly for multi-particle data,
+        where keeping one per frame would drop most detections.
     by : str, default "correlation"
         Column to rank by, highest first.  Use ``"z"`` for ``'Peak picker'``
         results, whose ``correlation`` column is all zeros.

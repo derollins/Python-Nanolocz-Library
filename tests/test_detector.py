@@ -57,6 +57,25 @@ def _blob_stack(
     return img
 
 
+def _multi_blob_stack(
+    n_frames: int = 2,
+    shape: tuple[int, int] = (64, 64),
+    sigma: float = 1.0,
+) -> np.ndarray:
+    """Return a frame-first stack with three Gaussian blobs per frame.
+
+    The blobs differ in height, and are far enough apart to be detected as
+    separate peaks, so tests of per-frame limiting actually drop detections.
+    """
+    blobs = ((16, 16, 1.0), (16, 48, 0.8), (48, 32, 0.6))
+    img = np.zeros((n_frames, *shape), dtype=np.float64)
+    for frame in range(n_frames):
+        for row, col, height in blobs:
+            img[frame, row, col] = height
+        img[frame] = gaussian_filter(img[frame], sigma=sigma)
+    return img
+
+
 def _run_peak_picker(img: np.ndarray, **kwargs: object) -> pd.DataFrame:
     """Run the detector in 'Peak picker' mode with convenient defaults."""
     params: dict[str, object] = {
@@ -797,33 +816,36 @@ def test_limit_per_frame_defaults_to_one_per_frame():
 
 
 def test_index_is_the_stable_detection_id():
-    """Check that the index survives limiting and dropping rows."""
-    res = _run_peak_picker(_blob_stack(n_frames=3))
+    """Check that the index survives limiting and dropping detections."""
+    res = _run_peak_picker(_multi_blob_stack())
 
-    assert res.index.tolist() == [0, 1, 2]
+    assert len(res) == 6
+    assert res.index.tolist() == [0, 1, 2, 3, 4, 5]
+    assert res["frame"].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
 
     limited = limit_per_frame(res, 2)
 
-    assert limited.index.tolist() == [0, 1, 2]  # n=2 keeps all three rows
+    # Two detections per frame survive; their ids are not renumbered.
+    assert limited.index.tolist() == [0, 1, 3, 4]
 
-    curated = res.drop(index=[1])
+    curated = res.drop(index=[1, 4])
 
-    assert curated.index.tolist() == [0, 2]  # ids are not renumbered
-    assert curated["frame"].tolist() == [0.0, 2.0]
+    assert curated.index.tolist() == [0, 2, 3, 5]
+    assert curated["frame"].tolist() == [0.0, 0.0, 1.0, 1.0]
 
 
 def test_kept_mask_can_live_outside_the_table():
-    """Check the GUI-style curation workflow: mask by index, no extra column."""
-    res = _run_peak_picker(_blob_stack(n_frames=3))
+    """Check the caller-side curation workflow: mask by index, no extra column."""
+    res = _run_peak_picker(_multi_blob_stack())
 
     kept = pd.Series(True, index=res.index)
-    kept.loc[1] = False
+    kept.loc[[1, 4]] = False
 
     curated = res[kept]
 
     assert list(curated.columns) == list(DETECTOR_COLUMNS)
-    assert curated.index.tolist() == [0, 2]
-    assert len(res) == 3  # input untouched
+    assert curated.index.tolist() == [0, 2, 3, 5]
+    assert len(res) == 6  # input untouched
 
 
 @pytest.mark.parametrize("n", [0, -1, 2.5, True])
