@@ -57,23 +57,33 @@ def _blob_stack(
     return img
 
 
-def _multi_blob_stack(
-    n_frames: int = 2,
-    shape: tuple[int, int] = (64, 64),
-    sigma: float = 1.0,
-) -> np.ndarray:
-    """Return a frame-first stack with three Gaussian blobs per frame.
+# (row, col, height, sigma) for each blob, listed in row-major scan order A, B, C.
+# The three orderings that matter all differ, so a test can tell which one was used:
+#   tallest two (Peak picker, by="z"):           A, C
+#   best two template matches (ccr, correlation): B, C  (B has the template's width)
+#   first two in scan order (ties / wrong column): A, B
+_BLOBS = ((16, 16, 0.8, 3.0), (16, 48, 0.6, 1.2), (48, 32, 1.0, 2.0))
 
-    The blobs differ in height, and are far enough apart to be detected as
-    separate peaks, so tests of per-frame limiting actually drop detections.
-    """
-    blobs = ((16, 16, 1.0), (16, 48, 0.8), (48, 32, 0.6))
-    img = np.zeros((n_frames, *shape), dtype=np.float64)
-    for frame in range(n_frames):
-        for row, col, height in blobs:
-            img[frame, row, col] = height
-        img[frame] = gaussian_filter(img[frame], sigma=sigma)
-    return img
+
+def _gaussian(
+    shape: tuple[int, int], row: float, col: float, height: float, sigma: float
+) -> np.ndarray:
+    """Return a 2D Gaussian blob."""
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    return height * np.exp(-((yy - row) ** 2 + (xx - col) ** 2) / (2 * sigma**2))
+
+
+def _multi_blob_stack(
+    n_frames: int = 2, shape: tuple[int, int] = (64, 64)
+) -> np.ndarray:
+    """Return a frame-first stack with the three ``_BLOBS`` in every frame."""
+    frame = sum(_gaussian(shape, *blob) for blob in _BLOBS)
+    return np.repeat(frame[np.newaxis], n_frames, axis=0)
+
+
+def _multi_blob_template() -> np.ndarray:
+    """Return an 11x11 template matching the narrowest blob (B)."""
+    return _gaussian((64, 64), 32, 32, 1.0, 1.2)[27:38, 27:38]
 
 
 def _run_peak_picker(img: np.ndarray, **kwargs: object) -> pd.DataFrame:
@@ -815,23 +825,36 @@ def test_limit_per_frame_defaults_to_one_per_frame():
     assert limit_per_frame(detections).index.tolist() == [1, 4]
 
 
-def test_index_is_the_stable_detection_id():
-    """Check that the index survives limiting and dropping detections."""
-    res = _run_peak_picker(_multi_blob_stack())
+@pytest.mark.parametrize(
+    ("method", "by", "expected"),
+    [
+        ("Peak picker", "z", [0, 2, 3, 5]),  # tallest two: A and C
+        ("ccr", "correlation", [1, 2, 4, 5]),  # best template matches: B and C
+    ],
+)
+def test_limit_per_frame_ranks_each_method_and_keeps_ids(method, by, expected):
+    """Check limiting keeps the best detections per frame, without renumbering.
 
-    assert len(res) == 6
+    The blobs are arranged so that the tallest two, the best two template
+    matches and the first two in scan order are all different sets, so this
+    fails if limiting ranks on the wrong column or just keeps scan order.
+    """
+    img = _multi_blob_stack()
+    if method == "ccr":
+        res = _run_ccr(img, _multi_blob_template(), min_thresh=0.3)
+    else:
+        res = _run_peak_picker(img)
+
     assert res.index.tolist() == [0, 1, 2, 3, 4, 5]
-    assert res["frame"].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    assert res["frame"].tolist() == [0, 0, 0, 1, 1, 1]
 
-    limited = limit_per_frame(res, 2)
+    limited = limit_per_frame(res, 2, by=by)
 
-    # Two detections per frame survive; their ids are not renumbered.
-    assert limited.index.tolist() == [0, 1, 3, 4]
+    assert limited.index.tolist() == expected  # ids are not renumbered
 
     curated = res.drop(index=[1, 4])
 
     assert curated.index.tolist() == [0, 2, 3, 5]
-    assert curated["frame"].tolist() == [0.0, 0.0, 1.0, 1.0]
 
 
 def test_kept_mask_can_live_outside_the_table():
