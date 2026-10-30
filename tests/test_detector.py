@@ -15,6 +15,7 @@ added once the MATLAB export step has been run.
 from __future__ import annotations
 
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -876,3 +877,21 @@ def test_limit_per_frame_rejects_bad_n(n):
     """Test that N must be a positive integer."""
     with pytest.raises(ValueError, match="positive integer"):
         limit_per_frame(pd.DataFrame({"frame": [0], "correlation": [1.0]}), n)
+
+
+def test_limit_per_frame_warns_when_ranking_column_cannot_rank():
+    """Check a constant ranking column warns, e.g. Peak picker by correlation."""
+    res = _run_peak_picker(_multi_blob_stack())  # correlation is all zeros
+
+    with pytest.warns(UserWarning, match='by="z"'):
+        limit_per_frame(res, 2)
+
+
+@pytest.mark.parametrize(("by", "n"), [("z", 2), ("correlation", 3)])
+def test_limit_per_frame_does_not_warn_when_ranking_is_meaningful(by, n):
+    """Check no warning when scores differ, or when nothing needs dropping."""
+    res = _run_peak_picker(_multi_blob_stack())  # three detections per frame
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        limit_per_frame(res, n, by=by)

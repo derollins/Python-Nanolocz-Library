@@ -70,6 +70,7 @@ Authors
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, fields
 from typing import Any, Iterable, Literal
 
@@ -219,7 +220,8 @@ def limit_per_frame(
         where keeping one per frame would drop most detections.
     by : str, default "correlation"
         Column to rank by, highest first.  Use ``"z"`` for ``'Peak picker'``
-        results, whose ``correlation`` column is all zeros.
+        results, whose ``correlation`` column is all zeros (a warning is
+        issued if the ranking column cannot tell the detections apart).
 
     Returns
     -------
@@ -235,9 +237,30 @@ def limit_per_frame(
         If ``n`` is not a positive integer.
     KeyError
         If ``by`` or ``frame`` is not a column of ``detections``.
+
+    Warns
+    -----
+    UserWarning
+        If, in a frame with more than ``n`` detections, every detection has
+        the same ``by`` value, so which detections are kept is arbitrary (for
+        example ``'Peak picker'`` results ranked by ``correlation``).
     """
     if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
         raise ValueError(f"n must be a positive integer, got {n!r}")
+
+    # Ranking only matters in frames with more than n detections; if the score
+    # is identical across such a frame, the kept rows would just be the first n.
+    scores = detections.groupby("frame")[by]
+    tied = (scores.size() > n) & (scores.nunique(dropna=False) == 1)
+    if tied.any():
+        warnings.warn(
+            f"limit_per_frame: {by!r} has the same value for every detection in "
+            f"{int(tied.sum())} frame(s) with more than {n} detections, so the "
+            "detections kept are arbitrary. For 'Peak picker' results use "
+            'by="z".',
+            UserWarning,
+            stacklevel=2,
+        )
     top = (
         detections.sort_values(by, ascending=False, kind="stable")
         .groupby("frame")
