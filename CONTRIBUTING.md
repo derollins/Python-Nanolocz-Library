@@ -54,9 +54,12 @@ testing and pre-commit tools.
 ```txt
 Python-Nanolocz-Library/
 ├── src/pnanolocz/
+│   ├── correlation.py     # MATLAB-compatible normalized 2D cross-correlation (normxcorr2).
+│   ├── detector.py        # Particle detection (peak picking / cross-correlation) returning tables.
 │   ├── level.py           # Background leveling and flattening for images and stacks.
 │   ├── level_weighted.py  # Region-wise weighted polynomial / median background estimation.
 │   ├── level_auto.py      # Automated, data-driven background correction workflows.
+│   ├── peaks.py           # Fast 2D local-maximum (peak) detection.
 │   └── thresholder.py     # Thresholding and edge-detection routines returning boolean masks.
 ├── tests/
 │   ├── test_level.py …    # One test module per source module.
@@ -77,22 +80,42 @@ Python-Nanolocz-Library/
 from a script or interactive notebook, integrated into other applications or used as a plugin. The core
 processing and analysis functions are the priority for porting since there are already a number of data
 loading, saving and display tools available within the Python ecosystem. For this reason the functions within
-the pnanolocz library should take a NumPy array and return an array or simple Python datatypes and structures
-such as numbers, lists, dictionaries and frozen dataclasses of arrays/floats.
+the pnanolocz library should take a NumPy array and return an array, simple Python datatypes and structures
+such as numbers, lists, dictionaries and frozen dataclasses of arrays/floats, or a `pandas.DataFrame` for
+tabular results (see below).
 
 ### The contract: arrays and parameters in, simple datatypes out
 
 - **Inputs are NumPy arrays and plain parameters.** A function receives the data it needs as an
   argument. To deliver AFM data as a NumPy array you can use [AFMReader](https://github.com/AFM-SPM/AFMReader)
   or [playNano](https://github.com/derollins/playNano) to load instrument files.
-- **Outputs are NumPy arrays and simple Python types.** Outputs should be arrays, plain numbers, and small
-  transparent records (a frozen dataclass of arrays/floats is fine). A function returns its result
-  for the caller to display, save, or pass on; the output should make sense with no display and no
-  filesystem.
+- **Outputs are NumPy arrays, simple Python types, or tables.** Image-like results (frames, stacks,
+  masks) are NumPy arrays; other results are plain numbers and small transparent records (a frozen
+  dataclass of arrays/floats is fine). A function returns its result for the caller to display, save,
+  or pass on; the output should make sense with no display and no filesystem.
+- **Tabular results are DataFrames at the public boundary.** Where a public function returns one row per
+  item (for example one row per detected particle), return a `pandas.DataFrame` with documented
+  snake_case columns. When nothing is found, return a 0-row table with the same columns and dtypes,
+  never a placeholder row. Only include columns the function computes itself; later steps add their
+  own. Internal and stage functions should work on plain arrays or frozen dataclasses of arrays, with
+  the DataFrame built once by the public function (see `detector.py`, where `_detect_locs` returns a
+  `Detections` record and `detector` converts it).
 - **Functions compose.** Prefer plain functions that take their inputs and return their outputs, so
   callers can chain them and hold any intermediate values themselves, which keeps each step
   independently testable and reusable. Where several steps run in sequence, express them as functions
   that pass their results along, and add a thin `run_*` wrapper if a single-call convenience is useful.
+
+### Coordinates and indexing
+
+- **Everything is 0-based.** `x` is the column index and `y` the row index, with the origin at the
+  top left and pixel centres at integer coordinates; frame numbers also start at 0, so results can
+  index arrays directly (`stack[frame, round(y), round(x)]`).
+- **Stacks are frame-first** `(N, H, W)`; a single `(H, W)` frame is treated as `N = 1`.
+- **No MATLAB-compatibility options.** Although this is providing a port of a MATLAB tool library,
+  direct compatibility is not necessary. Do not add 1-based indexing flags, axis-order arguments or
+  MATLAB-style aliases (e.g. CamelCase function names), and use `True`/`False` rather than `0`/`1` for
+  flags. Convert to MATLAB conventions only in tests that compare against MATLAB reference output
+  (for example, add 1 to coordinates and frame numbers).
 
 ### MATLAB alignment and reproducibility
 
@@ -110,7 +133,8 @@ Keep the base install lean. General-purpose tools should rely only on the core d
 Anything with a heavy or specialised dependency (large binary wheels, deep-learning stacks)
 belongs behind an **optional extra**, and its imports should be deferred (imported inside the
 function that needs them) so that `import pnanolocz` never requires an optional dependency and
-a missing extra can never break an unrelated part of the package.
+a missing extra can never break an unrelated part of the package. The core dependencies are
+currently `numpy`, `scipy`, `pandas`, `ruptures`, `sknw` and `scikit-image`.
 
 ---
 
@@ -184,11 +208,13 @@ All new code should include type hints. **pnanolocz** targets Python 3.11+, so b
 in CI, so annotations must be complete — including return types.
 
 ```python
-# Good — arrays annotated, return type explicit
-def process_frame(frame: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+FloatArray = np.ndarray[Any, np.dtype[np.float64]]
+
+# Good, arrays annotated with their dtype, return type explicit
+def process_frame(frame: FloatArray, sigma: float = 1.0) -> FloatArray:
     ...
 
-# Good — Optional for arguments that can be None
+# Good, optional for arguments that can be None
 def apply_thresholder(
     img: np.ndarray[Any, np.dtype[np.float64]],
     method: str,
@@ -199,8 +225,9 @@ def apply_thresholder(
 ```
 
 Return types should always be annotated. For functions that return nothing, annotate
-`-> None` explicitly. Type hints on private helpers (`_` prefix) are encouraged but slightly
-less strictly required than on public API.
+`-> None` explicitly. A bare `np.ndarray` annotation fails `mypy --strict` (missing type
+parameters), so use a dtype-parameterised alias such as `FloatArray` above. Type hints on
+private helpers (`_` prefix) are encouraged but slightly less strictly required than on public API.
 
 ---
 
