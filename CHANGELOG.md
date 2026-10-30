@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `limit_per_frame()` keeps the `n` highest-scoring detections in each frame (default one
     per frame; ranked by `correlation`, or by `z` for Peak picker results) and leaves the
     input table unchanged. The table index is the stable detection id, preserved when rows
-    are dropped.
+    are dropped. A `UserWarning` is issued when the ranking column has the same value for
+    every detection in a frame with more than `n` detections (e.g. Peak picker results
+    ranked by `correlation`), since the detections kept would then be arbitrary.
 - `peaks` module: `fast_peaks2d()`, a port of `Fast_peaks2D.m`, returning a `Peaks` record
   of 0-based integer `x`/`y` indices, `height` and optional `prominence`.
 - `correlation` module: `normxcorr2()`, an independent implementation of MATLAB-compatible
