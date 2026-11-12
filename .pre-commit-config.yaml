@@ -49,7 +49,10 @@ repos:
         args:
           - "--config-file=pyproject.toml"
         additional_dependencies:
-          - numpy
+          # numpy>=2.5 stubs use Python 3.12 syntax, which mypy rejects with
+          # python_version = 3.11 (pyproject.toml). Remove this cap when the
+          # minimum supported Python becomes 3.12.
+          - numpy<2.5
           - types-setuptools
           - typing-extensions
 

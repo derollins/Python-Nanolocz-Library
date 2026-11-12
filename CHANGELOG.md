@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `pandas` added to the core dependencies, for tabular (detection) outputs.
 
+### Infrastructure
+
+- Ruff's import sorting now matches the isort hook (`combine-as-imports`, `pnanolocz` as
+  first-party), so the two pre-commit hooks no longer undo each other on files with
+  `import ... as ...` imports.
+- The pre-commit mypy hook now installs `numpy<2.5`, whose type stubs still support the
+  Python 3.11 target. numpy 2.5 stubs need Python 3.12 and failed the hook when its
+  environment was built with Python 3.12.
+
 ---
 
 ## [0.1.0] - 2026-03-02
