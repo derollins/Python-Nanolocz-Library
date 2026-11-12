@@ -144,6 +144,12 @@ exclude = ["notebooks", "*.ipynb"]
 select = ["E", "F", "I", "B", "C4", "D"]
 ignore = ["D100", "D104", "D203", "D212", "D401"]
 
+# Match the isort hook (profile black, combine_as_imports) so the two don't
+# undo each other's import sorting.
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["pnanolocz"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
