@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
@@ -43,6 +44,5 @@ jobs:
         with:
             files: coverage.xml
             token: ${{ secrets.CODECOV_TOKEN }}     # noqa
-            slug: derollins/Python-Nanolocz-Library
             verbose: true
             fail_ci_if_error: true
