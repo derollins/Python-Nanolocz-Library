@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+﻿# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -51,3 +51,19 @@ coverage.xml
 .pytest_cache/
 .mypy_cache/
 .flake8
+
+# Local-only working data, generated stacks and evaluation artifacts
+.local/
+.idea/
+Software_testing_images/
+PORTING_PROMPT.md
+tests/Synthetic_Rotation/
+tests/Synthetic_Subpixel/
+tests/Synthetic_Translational/
+tests/test_output/
+tests/matlab/
+tests/resources/*.h5-jpk
+
+# Local generated-data tests (not published)
+tests/test_align_generated.py
+tests/evaluate_align_generated.py
