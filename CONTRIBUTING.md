@@ -54,6 +54,7 @@ testing and pre-commit tools.
 ```txt
 Python-Nanolocz-Library/
 ├── src/pnanolocz/
+│   ├── align.py           # Translation, rotation and movie-drift alignment returning tables.
 │   ├── correlation.py     # MATLAB-compatible normalized 2D cross-correlation (normxcorr2).
 │   ├── detector.py        # Particle detection (peak picking / cross-correlation) returning tables.
 │   ├── level.py           # Background leveling and flattening for images and stacks.

@@ -771,9 +771,11 @@ def _align_rotation(
     """
     angles = np.array(
         [
-            _rotation_corr(ref, target[idx], angle_range)
-            if method == "rotation corr"
-            else _polar_corr(ref, target[idx], angle_range)
+            (
+                _rotation_corr(ref, target[idx], angle_range)
+                if method == "rotation corr"
+                else _polar_corr(ref, target[idx], angle_range)
+            )
             for idx in range(target.shape[0])
         ],
         dtype=np.float64,

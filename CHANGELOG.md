@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `correlation` module: `normxcorr2()`, an independent implementation of MATLAB-compatible
   normalized 2D cross-correlation (`'full'` output). The result does not depend on the
   units of the input data.
-- `align` subpackage, a port of NanoLocz `align_trans.m`, `align_rot.m` and
+- `align` module, a port of NanoLocz `align_trans.m`, `align_rot.m` and
   `align_movie.m`:
   - `align_trans()` and `align_movie()` return a `pandas.DataFrame` with columns
     `frame, dx, dy`; `align_rot()` returns `frame, angle`. Frame numbers are 0-based,
